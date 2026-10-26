@@ -33,6 +33,7 @@ cs2::Profile profile;
 std::filesystem::path profile_directory;
 std::filesystem::path preview_directory;
 char finish_search[128]{};
+int selected_category = 0;
 char profile_name[65] = "default";
 std::string status = "Local profile editor. CS2 integration is not implemented.";
 bool status_error = false;
@@ -45,6 +46,7 @@ struct PreviewTexture {
     ID3D11ShaderResourceView* view = nullptr;
     unsigned width = 0, height = 0;
     std::uint64_t last_used = 0;
+    int last_frame = -1;
     std::string error;
     PreviewTexture() = default;
     PreviewTexture(const PreviewTexture&) = delete;
@@ -53,19 +55,23 @@ struct PreviewTexture {
 };
 std::unordered_map<std::string, PreviewTexture> previews;
 
-PreviewTexture& preview_texture(const cs2::Skin& skin) {
+PreviewTexture& preview_texture(const char* image_file) {
     static std::uint64_t tick = 0;
-    auto found = previews.find(skin.image_file);
+    const int frame = ImGui::GetFrameCount();
+    auto found = previews.find(image_file);
     if (found == previews.end()) {
-        if (previews.size() >= 48) {
-            const auto oldest = std::min_element(previews.begin(), previews.end(), [](const auto& a, const auto& b) {
-                return a.second.last_used < b.second.last_used;
-            });
-            previews.erase(oldest);
+        if (previews.size() >= 96) {
+            auto oldest = previews.end();
+            for (auto entry = previews.begin(); entry != previews.end(); ++entry) {
+                if (entry->second.last_frame != frame &&
+                    (oldest == previews.end() || entry->second.last_used < oldest->second.last_used)) oldest = entry;
+            }
+            // Draw commands hold texture pointers until the end of the current frame.
+            if (oldest != previews.end()) previews.erase(oldest);
         }
-        auto& texture = previews.try_emplace(skin.image_file).first->second;
+        auto& texture = previews.try_emplace(image_file).first->second;
         cs2::RgbaImage image;
-        if (cs2::decode_preview(preview_directory / skin.image_file, image, texture.error)) {
+        if (cs2::decode_preview(preview_directory / image_file, image, texture.error)) {
             D3D11_TEXTURE2D_DESC description{};
             description.Width = image.width;
             description.Height = image.height;
@@ -86,9 +92,10 @@ PreviewTexture& preview_texture(const cs2::Skin& skin) {
             } else texture.error = "Cannot create the preview texture";
             release(resource);
         }
-        found = previews.find(skin.image_file);
+        found = previews.find(image_file);
     }
     found->second.last_used = ++tick;
+    found->second.last_frame = frame;
     return found->second;
 }
 
@@ -260,7 +267,7 @@ void finish_list() {
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
                 ImGui::BeginTooltip();
                 ImGui::Text("%s | %s", skin.model, skin.finish);
-                auto& texture = preview_texture(skin);
+                auto& texture = preview_texture(cs2::skin_wear_preview(skin, skin.min_wear).file);
                 if (texture.view) image_fitted(texture, {240 * scale, 150 * scale});
                 else ImGui::TextUnformatted("Image unavailable");
                 ImGui::TextDisabled("Paint kit %d", skin.paint);
@@ -277,14 +284,15 @@ void skin_preview(const cs2::Skin* skin) {
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4{0.94f, 0.95f, 0.97f, 1});
     ImGui::BeginChild("preview", {0, 220 * scale}, ImGuiChildFlags_Borders);
     bool zoom = false;
+    const auto preview = skin ? cs2::skin_wear_preview(*skin, profile.item.wear) : cs2::WearPreview{nullptr, -1, false};
     if (skin) {
-        auto& texture = preview_texture(*skin);
+        auto& texture = preview_texture(preview.file);
         if (texture.view) zoom = image_fitted(texture, ImGui::GetContentRegionAvail());
         else {
             ImGui::TextColored(accent, "IMAGE UNAVAILABLE");
             note(texture.error.c_str());
             note("Extract the complete ZIP, including the previews folder next to the program.");
-            if (ImGui::Button("Retry image")) previews.erase(skin->image_file);
+            if (ImGui::Button("Retry image")) previews.erase(preview.file);
         }
     } else note("Select a paint kit to see its image. No preview is shown for unknown model/paint combinations.");
     ImGui::EndChild();
@@ -292,8 +300,9 @@ void skin_preview(const cs2::Skin* skin) {
     if (skin) {
         ImGui::TextWrapped("%s | %s", skin->model, skin->finish);
         ImGui::TextDisabled("Paint kit %d / click image to enlarge", skin->paint);
+        ImGui::TextColored(accent, "Preview: %s%s", cs2::wear_state_name(preview.state), preview.fallback ? " (nearest available)" : "");
     }
-    note("Catalog image. Wear and seed do not change this preview; exact patterns and wear vary in CS2.");
+    note("Preview follows wear condition. Some conditions share an image; exact float and seed are not rendered.");
     if (zoom) ImGui::OpenPopup("Skin preview");
     const auto display = ImGui::GetIO().DisplaySize;
     ImGui::SetNextWindowSize({std::min(820 * scale, display.x * 0.9f), std::min(650 * scale, display.y * 0.9f)},
@@ -302,19 +311,174 @@ void skin_preview(const cs2::Skin* skin) {
     if (ImGui::BeginPopupModal("Skin preview", &open, ImGuiWindowFlags_NoSavedSettings)) {
         if (skin) {
             ImGui::TextWrapped("%s | %s", skin->model, skin->finish);
-            auto& texture = preview_texture(*skin);
+            auto& texture = preview_texture(preview.file);
             auto area = ImGui::GetContentRegionAvail();
             area.y -= 80 * scale;
             if (texture.view) image_fitted(texture, area);
-            note("Static catalog image. Exact seed and wear are not rendered.");
+            ImGui::Text("%s / wear %.4f", cs2::wear_state_name(preview.state), profile.item.wear);
+            note("Condition preview from the catalog. Exact float and seed are not rendered.");
         }
         if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
     }
 }
 
+int& item_selection(cs2::Category category) {
+    switch (category) {
+    case cs2::Category::Agent: return profile.agent_id;
+    case cs2::Category::Music: return profile.music_kit;
+    case cs2::Category::Sticker: return profile.sticker_id;
+    case cs2::Category::Charm: return profile.charm_id;
+    default: return profile.agent_id;
+    }
+}
+
+const char* item_image(const cs2::CatalogItem& item) {
+    return item.category == cs2::Category::Music && profile.music_stattrak && item.stattrak_image ?
+        item.stattrak_image : item.image_file;
+}
+
+void select_catalog_item(const cs2::CatalogItem& item) {
+    item_selection(item.category) = item.id;
+    if (item.category == cs2::Category::Music && !item.stattrak_image) profile.music_stattrak = false;
+    dirty = true;
+}
+
+void item_card(const cs2::CatalogItem& item, float height) {
+    ImGui::PushID(item.id);
+    const auto position = ImGui::GetCursorScreenPos();
+    const float width = ImGui::GetContentRegionAvail().x;
+    const bool selected = item_selection(item.category) == item.id;
+    if (ImGui::Selectable("##item", selected, 0, {width, height})) select_catalog_item(item);
+    const bool hovered = ImGui::IsItemHovered();
+    auto* draw = ImGui::GetWindowDrawList();
+    const auto rgb = item.rarity_rgb;
+    draw->AddRectFilled({position.x, position.y + height - 2 * scale}, {position.x + width, position.y + height},
+        IM_COL32((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255, 255));
+    auto& texture = preview_texture(item.image_file);
+    if (texture.view) {
+        const float image_height = height - 58 * scale;
+        const float factor = std::min((width - 12 * scale) / texture.width, image_height / texture.height);
+        const ImVec2 size{texture.width * factor, texture.height * factor};
+        const ImVec2 begin{position.x + (width - size.x) / 2, position.y + (image_height - size.y) / 2};
+        draw->AddImage(static_cast<ImTextureID>(reinterpret_cast<std::uintptr_t>(texture.view)), begin,
+            {begin.x + size.x, begin.y + size.y});
+    } else draw->AddText({position.x + 8 * scale, position.y + 25 * scale}, ImGui::GetColorU32(muted), "Image unavailable");
+    const ImVec2 title{position.x + 7 * scale, position.y + height - 52 * scale};
+    draw->PushClipRect(title, {position.x + width - 5 * scale, position.y + height - 5 * scale}, true);
+    draw->AddText(ImGui::GetFont(), ImGui::GetFontSize(), title, ImGui::GetColorU32(ImGuiCol_Text),
+        item.name, nullptr, width - 14 * scale);
+    draw->PopClipRect();
+    if (hovered) ImGui::SetTooltip("%s\n%s / ID %d", item.name, item.group, item.id);
+    ImGui::PopID();
+}
+
+void other_items_page(cs2::Category category) {
+    struct Browser {
+        char search[160]{};
+        std::string group;
+        std::string last_search = "\xff";
+        std::string last_group;
+        std::vector<std::string> groups;
+        std::vector<const cs2::CatalogItem*> matches;
+    };
+    static Browser browsers[4];
+    auto& browser = browsers[static_cast<int>(category) - 3];
+    if (browser.groups.empty()) browser.groups = cs2::item_groups(category);
+    const float width = ImGui::GetContentRegionAvail().x;
+    const float height = ImGui::GetContentRegionAvail().y;
+    ImGui::BeginChild("item_catalog", {width * 0.64f, height}, ImGuiChildFlags_Borders);
+    heading("Catalog");
+    ImGui::SetNextItemWidth(-1);
+    ImGui::InputTextWithHint("##item_search", "Search item name or ID...", browser.search, sizeof(browser.search));
+    if (browser.groups.size() > 1) {
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::BeginCombo("##item_group", browser.group.empty() ? "All groups" : browser.group.c_str())) {
+            if (ImGui::Selectable("All groups", browser.group.empty())) browser.group.clear();
+            for (const auto& group : browser.groups)
+                if (ImGui::Selectable(group.c_str(), browser.group == group)) browser.group = group;
+            ImGui::EndCombo();
+        }
+    }
+    const bool changed = browser.last_search != browser.search || browser.last_group != browser.group;
+    if (changed) {
+        browser.matches = cs2::search_items(category, browser.search, browser.group);
+        browser.last_search = browser.search;
+        browser.last_group = browser.group;
+    }
+    ImGui::TextDisabled("%d items", static_cast<int>(browser.matches.size()));
+    ImGui::BeginChild("item_grid_scroll", {0, 0});
+    if (changed) ImGui::SetScrollY(0);
+    const int columns = std::clamp(static_cast<int>(ImGui::GetContentRegionAvail().x / (165 * scale)), 2, 4);
+    const float card_height = 172 * scale;
+    if (ImGui::BeginTable("item_grid", columns, ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_PadOuterX)) {
+        ImGuiListClipper clipper;
+        const int rows = (static_cast<int>(browser.matches.size()) + columns - 1) / columns;
+        clipper.Begin(rows);
+        while (clipper.Step()) {
+            for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
+                ImGui::TableNextRow();
+                for (int column = 0; column < columns; ++column) {
+                    ImGui::TableSetColumnIndex(column);
+                    const auto index = static_cast<std::size_t>(row * columns + column);
+                    if (index < browser.matches.size()) item_card(*browser.matches[index], card_height);
+                }
+            }
+        }
+        ImGui::EndTable();
+    }
+    if (browser.matches.empty()) note("No items match this search.");
+    ImGui::EndChild();
+    ImGui::EndChild();
+    ImGui::SameLine();
+    ImGui::BeginChild("other_item_preview", {0, height}, ImGuiChildFlags_Borders);
+    heading("Preview & selection");
+    const auto* item = cs2::find_item(category, item_selection(category));
+    bool zoom = false;
+    if (item) {
+        auto& texture = preview_texture(item_image(*item));
+        if (texture.view) zoom = image_fitted(texture, {ImGui::GetContentRegionAvail().x, 270 * scale});
+        else {
+            ImGui::TextColored(accent, "IMAGE UNAVAILABLE");
+            note(texture.error.c_str());
+            note("Keep the complete previews folder next to the program.");
+            if (ImGui::Button("Retry image")) previews.erase(item_image(*item));
+        }
+        ImGui::TextWrapped("%s", item->name);
+        ImGui::TextDisabled("ID %d", item->id);
+        note(item->group);
+        if (category == cs2::Category::Music) {
+            ImGui::BeginDisabled(!item->stattrak_image);
+            checkbox("StatTrak MVP", profile.music_stattrak);
+            ImGui::EndDisabled();
+            note("Album artwork preview. Audio playback is not included.");
+        }
+        if (category == cs2::Category::Sticker || category == cs2::Category::Charm)
+            note("Individual item preview. Placement on a weapon is not rendered.");
+        note("This item has no weapon float wear. Your selection is saved with the profile.");
+        if (ImGui::Button("Clear selection")) { item_selection(category) = 0; dirty = true; }
+    } else note("Choose an item from the catalog to view its image and save it to your profile.");
+    unavailable_apply();
+    if (zoom) ImGui::OpenPopup("Item preview");
+    const auto display = ImGui::GetIO().DisplaySize;
+    ImGui::SetNextWindowSize({std::min(820 * scale, display.x * 0.9f), std::min(650 * scale, display.y * 0.9f)}, ImGuiCond_Appearing);
+    bool open = true;
+    if (ImGui::BeginPopupModal("Item preview", &open, ImGuiWindowFlags_NoSavedSettings)) {
+        if (item) {
+            ImGui::TextWrapped("%s", item->name);
+            auto& texture = preview_texture(item_image(*item));
+            auto area = ImGui::GetContentRegionAvail();
+            area.y -= 50 * scale;
+            if (texture.view) image_fitted(texture, area);
+        }
+        if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+    ImGui::EndChild();
+}
+
 void skin_page() {
-    static int category = 0;
+    int& category = selected_category;
     static int last_definition = -1;
     static int remembered_models[] = {7, 500, 5033};
     if (last_definition != profile.item.definition_id) {
@@ -330,10 +494,10 @@ void skin_page() {
     const auto width = ImGui::GetContentRegionAvail().x;
     const auto height = ImGui::GetContentRegionAvail().y;
     ImGui::BeginChild("categories", {125 * scale, height}, ImGuiChildFlags_Borders);
-    const char* labels[] = {"Weapons", "Knives", "Gloves", "Music"};
+    const char* labels[] = {"Weapons", "Knives", "Gloves", "Agents", "Music", "Stickers", "Charms"};
     note("CATEGORIES");
     ImGui::Spacing();
-    for (int index = 0; index < 4; ++index) {
+    for (int index = 0; index < 7; ++index) {
         if (ImGui::Selectable(labels[index], category == index, 0, {0, 30 * scale})) {
             category = index;
             if (index < 3 && profile.item.definition_id != remembered_models[index]) select_model(remembered_models[index]);
@@ -341,15 +505,8 @@ void skin_page() {
     }
     ImGui::EndChild();
     ImGui::SameLine();
-    if (category == 3) {
-        ImGui::BeginChild("music", {0, height}, ImGuiChildFlags_Borders);
-        heading("Music kit");
-        note("Local desired settings. Music catalog, cover art and audio preview are not connected.");
-        ImGui::Spacing();
-        integer("Music kit ID", profile.music_kit);
-        checkbox("StatTrak MVP", profile.music_stattrak);
-        unavailable_apply();
-        ImGui::EndChild();
+    if (category >= 3) {
+        other_items_page(static_cast<cs2::Category>(category));
         return;
     }
     const auto remainder = width - 125 * scale - ImGui::GetStyle().ItemSpacing.x;
@@ -365,7 +522,11 @@ void skin_page() {
     heading("Preview & settings");
     const auto* selected = cs2::find_skin(profile.item.definition_id, profile.item.paint_kit);
     skin_preview(selected);
+    const bool has_wear = !selected || std::any_of(std::begin(selected->wear_images), std::end(selected->wear_images),
+        [](const char* image) { return image != nullptr; });
+    ImGui::BeginDisabled(!has_wear);
     slider("Wear", profile.item.wear, selected ? selected->min_wear : 0, selected ? selected->max_wear : 1, "%.4f");
+    ImGui::EndDisabled();
     integer("Seed", profile.item.seed);
     checkbox("StatTrak", profile.item.stattrak);
     if (profile.item.stattrak) integer("StatTrak count", profile.item.stattrak_count);
@@ -506,8 +667,9 @@ void settings_page() {
     ImGui::Spacing();
     heading("Skin previews");
     ImGui::Text("%d finishes / %d models", static_cast<int>(cs2::catalog_size()), static_cast<int>(cs2::catalog_models().size()));
+    note("Also includes 63 agents, 102 music kits, 11,134 stickers and 78 charms.");
     note("Images are loaded from the previews folder beside the program. Catalog data: ByMykel / CSGO-API. "
-         "Item artwork belongs to Valve and the respective creators. This is a static image viewer, not a 3D renderer.");
+         "Item artwork belongs to Valve and the respective creators. Wear selects a condition image; exact float and seed are not rendered.");
     note(preview_directory.u8string().c_str());
     ImGui::Spacing();
     heading("Integration status");
@@ -653,6 +815,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR command_line, int show) 
     bool done = false;
     bool graphics_failed = false;
     int smoke_frames = 0;
+    const char* smoke_image_file = nullptr;
     while (!done) {
         MSG message;
         while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
@@ -670,10 +833,24 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR command_line, int show) 
         }
         ImGui_ImplDX11_NewFrame(); ImGui_ImplWin32_NewFrame(); ImGui::NewFrame();
         if (smoke_test) {
-            const cs2::Skin* sample = smoke_frames < 2 ? cs2::find_skin(7, 282) :
-                smoke_frames < 4 ? cs2::find_skin(7, 302) : cs2::find_skin(5033, 10028);
-            if (!sample) { graphics_failed = true; break; }
-            select_skin(*sample);
+            if (smoke_frames < 10) {
+                const auto* sample = smoke_frames < 6 ? cs2::find_skin(7, 282) : cs2::find_skin(5033, 10028);
+                if (!sample) { graphics_failed = true; break; }
+                select_skin(*sample);
+                constexpr float wear_values[] = {0.1f, 0.25f, 0.7f, 0.06f, 0.8f};
+                profile.item.wear = wear_values[smoke_frames / 2];
+                selected_category = static_cast<int>(sample->category);
+                smoke_image_file = cs2::skin_wear_preview(*sample, profile.item.wear).file;
+            } else {
+                const cs2::Category categories[] = {cs2::Category::Agent, cs2::Category::Music, cs2::Category::Sticker, cs2::Category::Charm};
+                const int ids[] = {4613, 1, 8553, 1};
+                const int index = (smoke_frames - 10) / 2;
+                const auto* item = cs2::find_item(categories[index], ids[index]);
+                if (!item) { graphics_failed = true; break; }
+                selected_category = static_cast<int>(categories[index]);
+                select_catalog_item(*item);
+                smoke_image_file = item_image(*item);
+            }
         }
         draw();
         ImGui::Render();
@@ -684,9 +861,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR command_line, int show) 
         const auto result = swapchain->Present(1, 0);
         if (FAILED(result)) { graphics_failed = true; break; }
         if (smoke_test) {
-            const auto* sample = cs2::find_skin(profile.item.definition_id, profile.item.paint_kit);
-            if (!sample || !preview_texture(*sample).view) { graphics_failed = true; break; }
-            if (++smoke_frames == 6) done = true;
+            if (!smoke_image_file || !preview_texture(smoke_image_file).view) { graphics_failed = true; break; }
+            if (++smoke_frames == 18) done = true;
         }
         if (result == DXGI_STATUS_OCCLUDED) Sleep(30);
     }

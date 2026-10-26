@@ -45,6 +45,9 @@ struct Profile {
     WorldSettings world;
     int music_kit = 0;
     bool music_stattrak = false;
+    int agent_id = 0;
+    int sticker_id = 0;
+    int charm_id = 0;
 };
 
 // Bounds are editor input limits, not promises of values supported by CS2.

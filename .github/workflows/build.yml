@@ -23,6 +23,7 @@ jobs:
         with:
           path: assets/previews
           key: cs2-preview-png-${{ hashFiles('assets/preview-manifest.json') }}
+          restore-keys: cs2-preview-png-
       - name: Download offline previews
         if: runner.os == 'Windows'
         run: python tools/download_previews.py
@@ -74,3 +75,4 @@ jobs:
           name: CS2Profiles-windows-x64
           path: artifacts/CS2Profiles/
           if-no-files-found: error
+          compression-level: 0

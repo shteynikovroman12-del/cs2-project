@@ -23,7 +23,7 @@ namespace {
 constexpr std::size_t max_profile_bytes = 65536;
 
 template <typename P, typename Visitor>
-void fields(P& p, Visitor visit) {
+void fields(P& p, Visitor visit, bool include_v2 = true) {
 #define FIELD(name) visit(#name, p.name)
     FIELD(item.definition_id); FIELD(item.paint_kit); FIELD(item.wear);
     FIELD(item.seed); FIELD(item.stattrak); FIELD(item.stattrak_count);
@@ -39,6 +39,7 @@ void fields(P& p, Visitor visit) {
     FIELD(world.weather_enabled); FIELD(world.weather); FIELD(world.weather_density);
     FIELD(world.wetness_enabled); FIELD(world.wetness); FIELD(world.animation_speed);
     FIELD(world.rain); FIELD(world.leaf_sway);
+    if (include_v2) { FIELD(agent_id); FIELD(sticker_id); FIELD(charm_id); }
 #undef FIELD
 }
 
@@ -74,6 +75,9 @@ std::vector<std::string> validate(const Profile& p) {
     range("Seed", p.item.seed, 0, 1000);
     range("StatTrak count", p.item.stattrak_count, 0, 2147483647);
     range("Music kit", p.music_kit, 0, 1000000);
+    range("Agent", p.agent_id, 0, 65535);
+    range("Sticker", p.sticker_id, 0, 1000000);
+    range("Charm", p.charm_id, 0, 1000000);
     if (p.item.custom_name.size() > 128)
         errors.emplace_back("Custom name: maximum 128 UTF-8 bytes");
     for (unsigned char ch : p.item.custom_name) {
@@ -108,7 +112,7 @@ std::string serialize(const Profile& p) {
     if (!errors.empty()) throw std::invalid_argument(errors.front());
     std::ostringstream stream;
     stream.imbue(std::locale::classic());
-    stream << "format_version=1\n" << std::setprecision(std::numeric_limits<float>::max_digits10);
+    stream << "format_version=2\n" << std::setprecision(std::numeric_limits<float>::max_digits10);
     fields(p, [&](const char* key, const auto& value) {
         stream << key << '=';
         if constexpr (std::is_same_v<std::decay_t<decltype(value)>, std::string>)
@@ -137,9 +141,10 @@ bool deserialize(const std::string& text, Profile& destination, std::string& err
         }
     }
     const auto version = values.find("format_version");
-    if (version == values.end() || version->second != "1") {
+    if (version == values.end() || (version->second != "1" && version->second != "2")) {
         error = "Missing or unsupported profile version"; return false;
     }
+    const bool legacy = version->second == "1";
     values.erase(version);
     Profile candidate;
     bool valid = true;
@@ -152,7 +157,7 @@ bool deserialize(const std::string& text, Profile& destination, std::string& err
             return;
         }
         values.erase(found);
-    });
+    }, !legacy);
     if (!valid) return false;
     if (!values.empty()) { error = "Unknown profile field: " + values.begin()->first; return false; }
     const auto errors = validate(candidate);

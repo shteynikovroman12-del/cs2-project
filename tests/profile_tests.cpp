@@ -56,6 +56,9 @@ void roundtrip() {
     original.world.leaf_sway = 10;
     original.music_kit = 10;
     original.music_stattrak = true;
+    original.agent_id = 4613;
+    original.sticker_id = 8553;
+    original.charm_id = 1;
     const auto text = cs2::serialize(original);
     cs2::Profile loaded;
     std::string error;
@@ -75,7 +78,7 @@ void malformed() {
     const auto before = cs2::serialize(destination);
     std::string error;
     const std::vector<std::string> cases{
-        "", "format_version=2\n", baseline + "item.seed=1\n",
+        "", "format_version=99\n", baseline + "item.seed=1\n",
         baseline + "unknown=3\n", baseline + "invalid line\n",
         changed(baseline, "item.wear", "nan"),
         changed(baseline, "item.wear", "inf"),
@@ -95,6 +98,28 @@ void malformed() {
         require(!error.empty(), "failure has no diagnostic");
         require(cs2::serialize(destination) == before, "failed load changed live state");
     }
+}
+
+void legacy() {
+    const auto path = std::filesystem::path(__FILE__).parent_path() / "fixtures/profile-v1.cs2profile";
+    cs2::Profile profile;
+    profile.agent_id = 999;
+    std::string error;
+    const bool loaded = cs2::load_profile(path, profile, error);
+    require(loaded, error.c_str());
+    require(profile.item.custom_name == "Legacy profile" && profile.item.paint_kit == 282,
+        "legacy item selection was lost");
+    require(profile.music_kit == 3 && profile.item.wear == 0.15f, "legacy music/wear changed");
+    require(profile.agent_id == 0 && profile.sticker_id == 0 && profile.charm_id == 0,
+        "legacy profile did not initialize new item categories");
+    const auto upgraded = cs2::serialize(profile);
+    require(upgraded.find("format_version=2\n") == 0, "profile was not upgraded on save");
+    auto missing = upgraded;
+    missing.erase(missing.find("agent_id="));
+    require(!cs2::deserialize(missing, profile, error), "v2 profile with missing item fields accepted");
+    auto future = upgraded;
+    future.replace(0, std::string("format_version=2").size(), "format_version=99");
+    require(!cs2::deserialize(future, profile, error), "unknown future version accepted");
 }
 
 void validation() {
@@ -159,6 +184,7 @@ int main(int argc, char** argv) {
         else if (test == "malformed") malformed();
         else if (test == "validation") validation();
         else if (test == "filesystem") filesystem();
+        else if (test == "legacy") legacy();
         else throw std::runtime_error("unknown test case");
         std::cout << "PASS " << test << '\n';
         return 0;

@@ -22,25 +22,34 @@ int main(int argc, char** argv) {
         std::string error;
         std::set<std::uint64_t> sample_images;
         int checked = 0;
-        for (auto skin = cs2::catalog_begin(); skin != cs2::catalog_end(); ++skin) {
-            const bool loaded = cs2::decode_preview(root / skin->image_file, image, error);
-            require(loaded, std::string(skin->image_file) + ": " + error);
+        for (const auto& file : cs2::catalog_image_files()) {
+            const bool loaded = cs2::decode_preview(root / file, image, error);
+            require(loaded, file + ": " + error);
             require(image.pixels.size() == static_cast<std::size_t>(image.width) * image.height * 4,
                 "wrong RGBA pixel buffer size");
             bool visible = false, transparent = false;
             for (std::size_t index = 3; index < image.pixels.size(); index += 4) {
                 visible |= image.pixels[index] != 0;
                 transparent |= image.pixels[index] != 255;
+                if (visible && transparent) break;
             }
-            require(visible, std::string(skin->image_file) + " is entirely invisible");
-            if ((skin->definition == 7 && (skin->paint == 282 || skin->paint == 302)) ||
-                (skin->definition == 5033 && skin->paint == 10028)) {
+            require(visible, file + " is entirely invisible");
+            if (file == "7_282.png" || file == "7_302.png" || file == "5033_10028.png") {
                 sample_images.insert(fingerprint(image));
                 require(transparent, "sample preview lost alpha transparency");
             }
             ++checked;
         }
         require(sample_images.size() == 3, "distinct representative skins decoded to the same image");
+        for (const auto* skin : {cs2::find_skin(7, 282), cs2::find_skin(5033, 10028)}) {
+            require(skin != nullptr, "wear test skin missing");
+            const auto fresh = cs2::skin_wear_preview(*skin, skin->min_wear);
+            const auto worn = cs2::skin_wear_preview(*skin, skin->max_wear);
+            require(cs2::decode_preview(root / fresh.file, image, error), "cannot decode fresh wear image");
+            const auto fresh_hash = fingerprint(image);
+            require(cs2::decode_preview(root / worn.file, image, error), "cannot decode worn wear image");
+            require(fresh_hash != fingerprint(image), "wear states render identical pixels");
+        }
         require(!cs2::decode_preview(root / "missing-image.png", image, error), "missing image was accepted");
         require(image.pixels.empty() && image.width == 0, "failed load retained the previous skin image");
         const auto temp = std::filesystem::temp_directory_path() /

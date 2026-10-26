@@ -43,7 +43,8 @@ def fetch(entry, output):
     filename, url = entry['file'], entry['url']
     if Path(filename).name != filename or not filename.endswith('.png'):
         raise ValueError('Unsafe image filename')
-    if not url.startswith('https://community.akamai.steamstatic.com/economy/image/'):
+    if not url.startswith(('https://community.akamai.steamstatic.com/economy/image/',
+                           'https://cdn.steamstatic.com/apps/730/icons/')):
         raise ValueError('Unexpected image destination')
     path = output / filename
     if path.exists():
@@ -88,7 +89,8 @@ def main():
                 print(f'Checked {count}/{len(entries)} images; failures: {len(failures)}', flush=True)
     if failures:
         for failure in failures[:20]:
-            print(failure)
+            safe = failure.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+            print(f'::error title=Preview download::{safe}')
         raise SystemExit(f'{len(failures)} images missing; refusing to produce an incomplete package')
     print('All catalog images are ready for offline use.')
 
