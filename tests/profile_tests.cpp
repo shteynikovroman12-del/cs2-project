@@ -144,7 +144,7 @@ void filesystem() {
     std::filesystem::create_directories(directory_target);
     require(!cs2::save_profile(directory_target, cs2::Profile{}, error), "directory replaced by file");
     for (const auto& entry : std::filesystem::recursive_directory_iterator(root))
-        require(entry.path().string().find(".tmp-") == std::string::npos, "temporary save file leaked");
+        require(entry.path().filename().u8string().find(".tmp-") == std::string::npos, "temporary save file leaked");
     { std::ofstream out(path, std::ios::trunc); out << std::string(65537, 'x'); }
     require(!cs2::load_profile(path, loaded, error), "oversized file accepted");
     require(loaded.item.custom_name == "Updated profile", "oversized file changed state");

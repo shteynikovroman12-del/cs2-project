@@ -22,7 +22,32 @@ jobs:
       - name: Build
         run: cmake --build build/ci --config Release --parallel 2
       - name: Test profiles
-        run: ctest --test-dir build/ci -C Release --output-on-failure
+        run: ctest --test-dir build/ci -C Release --output-on-failure --output-junit test-results.xml
+      - name: Report test results
+        if: always()
+        shell: python
+        run: |
+          import os
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          results = Path('build/ci/test-results.xml')
+          if results.exists():
+              suite = ET.parse(results).getroot()
+              lines = ['## Profile tests', '', '| Test | Result |', '| --- | --- |']
+              for case in suite.iter('testcase'):
+                  failed = case.find('failure') is not None or case.find('error') is not None
+                  skipped = case.find('skipped') is not None
+                  outcome = 'Failed' if failed else 'Skipped' if skipped else 'Passed'
+                  lines.append(f"| {case.get('name')} | {outcome} |")
+                  if failed:
+                      output = case.findtext('system-out', '')
+                      details = '\n'.join(node.text or '' for node in case if node.tag in ('failure', 'error'))
+                      message = (details + '\n' + output)[:6000]
+                      message = message.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+                      print(f"::error title={case.get('name')}::{message}")
+              with Path(os.environ['GITHUB_STEP_SUMMARY']).open('a', encoding='utf-8') as summary:
+                  summary.write('\n'.join(lines) + '\n')
       - name: Collect Windows package
         if: runner.os == 'Windows'
         shell: pwsh
