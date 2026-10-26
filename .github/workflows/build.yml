@@ -17,6 +17,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: Test client information report on Windows PowerShell
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: ./tests/test_client_info.ps1
       - name: Cache catalog images
         if: runner.os == 'Windows'
         uses: actions/cache@v4
@@ -27,8 +31,23 @@ jobs:
       - name: Download offline previews
         if: runner.os == 'Windows'
         run: python tools/download_previews.py
+      - name: Set up Python for preview packaging
+        if: runner.os == 'Windows'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Prepare lightweight previews
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python -m pip install -r tools/requirements-preview-build.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m unittest discover -s tests -p test_lite_previews.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python tools/prepare_lite_previews.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Configure
-        run: cmake -S . -B build/ci -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build/ci -DCMAKE_BUILD_TYPE=Release -DPREVIEW_IMAGE_DIR=assets/previews-lite
       - name: Build
         run: cmake --build build/ci --config Release --parallel 2
       - name: Test profiles
@@ -69,10 +88,11 @@ jobs:
           Copy-Item -Recurse licenses artifacts/CS2Profiles/
           Copy-Item -Recurse build/ci/Release/previews artifacts/CS2Profiles/
           Copy-Item THIRD_PARTY_NOTICES.md artifacts/CS2Profiles/
+          Copy-Item tools/Collect-CS2Info.ps1,tools/Collect-CS2Info.cmd artifacts/CS2Profiles/
       - uses: actions/upload-artifact@v4
         if: runner.os == 'Windows'
         with:
-          name: CS2Profiles-windows-x64
+          name: CS2Profiles-windows-x64-lite
           path: artifacts/CS2Profiles/
           if-no-files-found: error
           compression-level: 0

@@ -20,3 +20,8 @@ Some conditions share the same artwork. It is not an exact rendering of a
 particular seed, float value within that condition, StatTrak counter, sticker
 placement or in-game lighting. Agent, music kit, sticker and charm previews show
 the individual item; sticker scraping and attachment placement are not rendered.
+
+The lightweight package resizes the same artwork to a maximum edge of 384 pixels,
+preserving transparency and aspect ratio. All catalog entries and available wear
+condition images remain included. Enlarged images have less detail. Pillow is
+used only by the build tooling and is not distributed with the Windows app.

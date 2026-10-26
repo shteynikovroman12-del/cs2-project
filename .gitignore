@@ -3,4 +3,5 @@
 /.vs/
 *.user
 /assets/previews/
+/assets/previews-lite/
 __pycache__/
