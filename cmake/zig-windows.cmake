@@ -1,0 +1,10 @@
+# Use Zig 0.14.1. Set ZIG_EXECUTABLE to the absolute path of the zig executable.
+set(CMAKE_SYSTEM_NAME Windows)
+set(CMAKE_SYSTEM_PROCESSOR AMD64)
+if(NOT ZIG_EXECUTABLE)
+  find_program(ZIG_EXECUTABLE zig REQUIRED)
+endif()
+set(CMAKE_CXX_COMPILER "${ZIG_EXECUTABLE}")
+set(CMAKE_CXX_COMPILER_ARG1 "c++")
+set(CMAKE_CXX_FLAGS_INIT "-target x86_64-windows-gnu")
+set(CMAKE_TRY_COMPILE_PLATFORM_VARIABLES ZIG_EXECUTABLE)

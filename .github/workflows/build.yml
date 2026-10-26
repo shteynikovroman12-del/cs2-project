@@ -1,0 +1,39 @@
+name: Build and test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build/ci -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build/ci --config Release --parallel 2
+      - name: Test profiles
+        run: ctest --test-dir build/ci -C Release --output-on-failure
+      - name: Collect Windows package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force artifacts/CS2Profiles
+          Copy-Item build/ci/Release/cs2_profiles.exe artifacts/CS2Profiles/
+          Copy-Item README.md artifacts/CS2Profiles/
+          Copy-Item build/ci/_deps/imgui-src/LICENSE.txt artifacts/CS2Profiles/IMGUI-LICENSE.txt
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: CS2Profiles-windows-x64
+          path: artifacts/CS2Profiles/
+          if-no-files-found: error
