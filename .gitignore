@@ -2,3 +2,5 @@
 /artifacts/
 /.vs/
 *.user
+/assets/previews/
+__pycache__/

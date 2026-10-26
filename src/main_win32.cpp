@@ -1,4 +1,6 @@
 #include "profile.hpp"
+#include "catalog.hpp"
+#include "image_decode.hpp"
 #include "imgui.h"
 #include "imgui_impl_dx11.h"
 #include "imgui_impl_win32.h"
@@ -13,6 +15,7 @@
 #include <cstring>
 #include <filesystem>
 #include <string>
+#include <unordered_map>
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
 
@@ -28,12 +31,78 @@ const ImVec4 accent{1.0f, 0.18f, 0.38f, 1.0f};
 const ImVec4 muted{0.46f, 0.48f, 0.52f, 1.0f};
 cs2::Profile profile;
 std::filesystem::path profile_directory;
+std::filesystem::path preview_directory;
+char finish_search[128]{};
 char profile_name[65] = "default";
 std::string status = "Local profile editor. CS2 integration is not implemented.";
 bool status_error = false;
 
 template <typename T> void release(T*& object) {
     if (object) { object->Release(); object = nullptr; }
+}
+
+struct PreviewTexture {
+    ID3D11ShaderResourceView* view = nullptr;
+    unsigned width = 0, height = 0;
+    std::uint64_t last_used = 0;
+    std::string error;
+    PreviewTexture() = default;
+    PreviewTexture(const PreviewTexture&) = delete;
+    PreviewTexture& operator=(const PreviewTexture&) = delete;
+    ~PreviewTexture() { release(view); }
+};
+std::unordered_map<std::string, PreviewTexture> previews;
+
+PreviewTexture& preview_texture(const cs2::Skin& skin) {
+    static std::uint64_t tick = 0;
+    auto found = previews.find(skin.image_file);
+    if (found == previews.end()) {
+        if (previews.size() >= 48) {
+            const auto oldest = std::min_element(previews.begin(), previews.end(), [](const auto& a, const auto& b) {
+                return a.second.last_used < b.second.last_used;
+            });
+            previews.erase(oldest);
+        }
+        auto& texture = previews.try_emplace(skin.image_file).first->second;
+        cs2::RgbaImage image;
+        if (cs2::decode_preview(preview_directory / skin.image_file, image, texture.error)) {
+            D3D11_TEXTURE2D_DESC description{};
+            description.Width = image.width;
+            description.Height = image.height;
+            description.MipLevels = 1;
+            description.ArraySize = 1;
+            description.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            description.SampleDesc.Count = 1;
+            description.Usage = D3D11_USAGE_IMMUTABLE;
+            description.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            D3D11_SUBRESOURCE_DATA pixels{};
+            pixels.pSysMem = image.pixels.data();
+            pixels.SysMemPitch = image.width * 4;
+            ID3D11Texture2D* resource = nullptr;
+            if (SUCCEEDED(device->CreateTexture2D(&description, &pixels, &resource)) &&
+                SUCCEEDED(device->CreateShaderResourceView(resource, nullptr, &texture.view))) {
+                texture.width = image.width;
+                texture.height = image.height;
+            } else texture.error = "Cannot create the preview texture";
+            release(resource);
+        }
+        found = previews.find(skin.image_file);
+    }
+    found->second.last_used = ++tick;
+    return found->second;
+}
+
+bool image_fitted(PreviewTexture& texture, ImVec2 area) {
+    if (!texture.view || area.x <= 0 || area.y <= 0) return false;
+    const float fit = std::min(area.x / texture.width, area.y / texture.height);
+    const ImVec2 size{texture.width * fit, texture.height * fit};
+    const auto cursor = ImGui::GetCursorPos();
+    ImGui::SetCursorPos({cursor.x + (area.x - size.x) / 2, cursor.y + (area.y - size.y) / 2});
+    ImGui::Image(static_cast<ImTextureID>(reinterpret_cast<std::uintptr_t>(texture.view)), size);
+    const bool clicked = ImGui::IsItemClicked();
+    ImGui::SetCursorPos({cursor.x, cursor.y + area.y + ImGui::GetStyle().ItemSpacing.y});
+    ImGui::Dummy({0, 0});
+    return clicked;
 }
 
 bool create_render_target() {
@@ -65,6 +134,7 @@ bool create_device(HWND window) {
 }
 
 void destroy_device() {
+    previews.clear();
     release(render_target); release(swapchain); release(context); release(device);
 }
 
@@ -139,34 +209,124 @@ void unavailable_apply() {
     note("No game connection. Editing a profile does not change CS2 or your Steam inventory.");
 }
 
-struct Model { const char* name; int definition; };
-constexpr Model weapons[] = {{"AK-47", 7}, {"M4A4", 16}, {"M4A1-S", 60}, {"AWP", 9},
-    {"USP-S", 61}, {"Glock-18", 4}, {"Desert Eagle", 1}};
-constexpr Model knives[] = {{"Bayonet", 500}, {"Flip Knife", 505}, {"Gut Knife", 506},
-    {"Karambit", 507}, {"M9 Bayonet", 508}, {"Huntsman Knife", 509}, {"Butterfly Knife", 515}};
-constexpr Model gloves[] = {{"Bloodhound Gloves", 5027}, {"Sport Gloves", 5030},
-    {"Driver Gloves", 5031}, {"Hand Wraps", 5032}, {"Moto Gloves", 5033},
-    {"Specialist Gloves", 5034}, {"Hydra Gloves", 5035}};
+void select_skin(const cs2::Skin& skin) {
+    profile.item.definition_id = skin.definition;
+    profile.item.paint_kit = skin.paint;
+    profile.item.wear = std::clamp(profile.item.wear, skin.min_wear, skin.max_wear);
+    dirty = true;
+}
+
+void select_model(int definition) {
+    if (const auto* skin = cs2::first_skin(definition)) select_skin(*skin);
+    finish_search[0] = '\0';
+}
 
 void model_list(int category) {
-    const Model* models = weapons;
-    std::size_t count = std::size(weapons);
-    if (category == 1) { models = knives; count = std::size(knives); }
-    if (category == 2) { models = gloves; count = std::size(gloves); }
     heading("Models");
-    for (std::size_t index = 0; index < count; ++index) {
-        if (ImGui::Selectable(models[index].name, profile.item.definition_id == models[index].definition,
-            0, {0, 28 * scale})) {
-            profile.item.definition_id = models[index].definition;
-            dirty = true;
-        }
+    for (const auto& model : cs2::catalog_models()) {
+        if (static_cast<int>(model.category) != category) continue;
+        if (ImGui::Selectable(model.name, profile.item.definition_id == model.definition,
+            0, {0, 28 * scale})) select_model(model.definition);
     }
     ImGui::Spacing();
-    note("Common definition IDs. Availability and compatibility have not been checked against your game build.");
+    note("Catalog: CSGO-API / ByMykel");
+}
+
+void finish_list() {
+    heading("Paint kits");
+    ImGui::SetNextItemWidth(-1);
+    ImGui::InputTextWithHint("##finish_search", "Search name or ID...", finish_search, sizeof(finish_search));
+    const auto matches = cs2::search_skins(profile.item.definition_id, finish_search);
+    ImGui::TextDisabled("%d finishes", static_cast<int>(matches.size()));
+    ImGui::BeginChild("finish_rows", {0, 0});
+    static int previous_model = -1;
+    if (previous_model != profile.item.definition_id) {
+        ImGui::SetScrollY(0);
+        previous_model = profile.item.definition_id;
+    }
+    ImGuiListClipper clipper;
+    clipper.Begin(static_cast<int>(matches.size()), 32 * scale + ImGui::GetStyle().ItemSpacing.y);
+    while (clipper.Step()) {
+        for (int index = clipper.DisplayStart; index < clipper.DisplayEnd; ++index) {
+            const auto& skin = *matches[index];
+            ImGui::PushID(skin.paint);
+            const auto position = ImGui::GetCursorScreenPos();
+            const auto rgb = skin.rarity_rgb;
+            const auto color = IM_COL32((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255, 255);
+            ImGui::GetWindowDrawList()->AddRectFilled(position, {position.x + 3 * scale, position.y + 28 * scale}, color);
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 10 * scale);
+            if (ImGui::Selectable(skin.finish, profile.item.paint_kit == skin.paint, 0, {0, 32 * scale}))
+                select_skin(skin);
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                ImGui::BeginTooltip();
+                ImGui::Text("%s | %s", skin.model, skin.finish);
+                auto& texture = preview_texture(skin);
+                if (texture.view) image_fitted(texture, {240 * scale, 150 * scale});
+                else ImGui::TextUnformatted("Image unavailable");
+                ImGui::TextDisabled("Paint kit %d", skin.paint);
+                ImGui::EndTooltip();
+            }
+            ImGui::PopID();
+        }
+    }
+    if (matches.empty()) note("No matching finishes for this model.");
+    ImGui::EndChild();
+}
+
+void skin_preview(const cs2::Skin* skin) {
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4{0.94f, 0.95f, 0.97f, 1});
+    ImGui::BeginChild("preview", {0, 220 * scale}, ImGuiChildFlags_Borders);
+    bool zoom = false;
+    if (skin) {
+        auto& texture = preview_texture(*skin);
+        if (texture.view) zoom = image_fitted(texture, ImGui::GetContentRegionAvail());
+        else {
+            ImGui::TextColored(accent, "IMAGE UNAVAILABLE");
+            note(texture.error.c_str());
+            note("Extract the complete ZIP, including the previews folder next to the program.");
+            if (ImGui::Button("Retry image")) previews.erase(skin->image_file);
+        }
+    } else note("Select a paint kit to see its image. No preview is shown for unknown model/paint combinations.");
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+    if (skin) {
+        ImGui::TextWrapped("%s | %s", skin->model, skin->finish);
+        ImGui::TextDisabled("Paint kit %d / click image to enlarge", skin->paint);
+    }
+    note("Catalog image. Wear and seed do not change this preview; exact patterns and wear vary in CS2.");
+    if (zoom) ImGui::OpenPopup("Skin preview");
+    const auto display = ImGui::GetIO().DisplaySize;
+    ImGui::SetNextWindowSize({std::min(820 * scale, display.x * 0.9f), std::min(650 * scale, display.y * 0.9f)},
+        ImGuiCond_Appearing);
+    bool open = true;
+    if (ImGui::BeginPopupModal("Skin preview", &open, ImGuiWindowFlags_NoSavedSettings)) {
+        if (skin) {
+            ImGui::TextWrapped("%s | %s", skin->model, skin->finish);
+            auto& texture = preview_texture(*skin);
+            auto area = ImGui::GetContentRegionAvail();
+            area.y -= 80 * scale;
+            if (texture.view) image_fitted(texture, area);
+            note("Static catalog image. Exact seed and wear are not rendered.");
+        }
+        if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
 }
 
 void skin_page() {
     static int category = 0;
+    static int last_definition = -1;
+    static int remembered_models[] = {7, 500, 5033};
+    if (last_definition != profile.item.definition_id) {
+        for (const auto& model : cs2::catalog_models()) {
+            if (model.definition == profile.item.definition_id) {
+                category = static_cast<int>(model.category);
+                remembered_models[category] = model.definition;
+                break;
+            }
+        }
+        last_definition = profile.item.definition_id;
+    }
     const auto width = ImGui::GetContentRegionAvail().x;
     const auto height = ImGui::GetContentRegionAvail().y;
     ImGui::BeginChild("categories", {125 * scale, height}, ImGuiChildFlags_Borders);
@@ -174,7 +334,10 @@ void skin_page() {
     note("CATEGORIES");
     ImGui::Spacing();
     for (int index = 0; index < 4; ++index) {
-        if (ImGui::Selectable(labels[index], category == index, 0, {0, 30 * scale})) category = index;
+        if (ImGui::Selectable(labels[index], category == index, 0, {0, 30 * scale})) {
+            category = index;
+            if (index < 3 && profile.item.definition_id != remembered_models[index]) select_model(remembered_models[index]);
+        }
     }
     ImGui::EndChild();
     ImGui::SameLine();
@@ -190,30 +353,19 @@ void skin_page() {
         return;
     }
     const auto remainder = width - 125 * scale - ImGui::GetStyle().ItemSpacing.x;
-    ImGui::BeginChild("models", {remainder * 0.25f, height}, ImGuiChildFlags_Borders);
+    ImGui::BeginChild("models", {remainder * 0.22f, height}, ImGuiChildFlags_Borders);
     model_list(category);
     ImGui::EndChild();
     ImGui::SameLine();
-    ImGui::BeginChild("paint", {remainder * 0.28f, height}, ImGuiChildFlags_Borders);
-    heading("Paint kit");
-    integer("Definition ID", profile.item.definition_id);
-    integer("Paint kit ID", profile.item.paint_kit);
-    ImGui::Spacing();
-    note("Enter IDs manually. A verified paint catalog and game asset previews are not available in this build.");
-    ImGui::Spacing();
-    note("This profile stores one item. Choosing a model changes that item's definition ID.");
+    ImGui::BeginChild("paint", {remainder * 0.30f, height}, ImGuiChildFlags_Borders);
+    finish_list();
     ImGui::EndChild();
     ImGui::SameLine();
     ImGui::BeginChild("item_settings", {0, height}, ImGuiChildFlags_Borders);
     heading("Preview & settings");
-    ImGui::BeginChild("preview", {0, 140 * scale}, ImGuiChildFlags_Borders);
-    ImGui::Spacing();
-    ImGui::TextColored(accent, "PREVIEW UNAVAILABLE");
-    note("Game assets have not been loaded.");
-    ImGui::Spacing();
-    ImGui::Text("Definition %d / Paint %d", profile.item.definition_id, profile.item.paint_kit);
-    ImGui::EndChild();
-    slider("Wear", profile.item.wear, 0, 1, "%.4f");
+    const auto* selected = cs2::find_skin(profile.item.definition_id, profile.item.paint_kit);
+    skin_preview(selected);
+    slider("Wear", profile.item.wear, selected ? selected->min_wear : 0, selected ? selected->max_wear : 1, "%.4f");
     integer("Seed", profile.item.seed);
     checkbox("StatTrak", profile.item.stattrak);
     if (profile.item.stattrak) integer("StatTrak count", profile.item.stattrak_count);
@@ -225,6 +377,10 @@ void skin_page() {
     checkbox("T", profile.item.equip_t);
     ImGui::SameLine();
     checkbox("CT", profile.item.equip_ct);
+    if (ImGui::CollapsingHeader("Manual IDs")) {
+        integer("Definition ID", profile.item.definition_id);
+        integer("Paint kit ID", profile.item.paint_kit);
+    }
     unavailable_apply();
     ImGui::EndChild();
 }
@@ -348,6 +504,12 @@ void settings_page() {
     ImGui::Spacing();
     note(profile_directory.u8string().c_str());
     ImGui::Spacing();
+    heading("Skin previews");
+    ImGui::Text("%d finishes / %d models", static_cast<int>(cs2::catalog_size()), static_cast<int>(cs2::catalog_models().size()));
+    note("Images are loaded from the previews folder beside the program. Catalog data: ByMykel / CSGO-API. "
+         "Item artwork belongs to Valve and the respective creators. This is a static image viewer, not a 3D renderer.");
+    note(preview_directory.u8string().c_str());
+    ImGui::Spacing();
     heading("Integration status");
     ImGui::TextColored(accent, "NOT IMPLEMENTED");
     note("This application does not attach to CS2, modify the game, read your inventory, or communicate with Steam. "
@@ -426,7 +588,15 @@ LRESULT WINAPI window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lpar
 }
 } // namespace
 
-int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show) {
+int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR command_line, int show) {
+    const bool smoke_test = std::string(command_line) == "--preview-smoke-test";
+    wchar_t executable[32768]{};
+    const DWORD path_length = GetModuleFileNameW(nullptr, executable, static_cast<DWORD>(std::size(executable)));
+    if (!path_length || path_length >= std::size(executable)) {
+        MessageBoxW(nullptr, L"Cannot locate the application folder.", L"CS2 Profiles", MB_ICONERROR);
+        return 1;
+    }
+    preview_directory = std::filesystem::path(executable).parent_path() / L"previews";
     PWSTR appdata = nullptr;
     if (FAILED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &appdata))) {
         MessageBoxW(nullptr, L"Cannot locate LocalAppData for profile storage.", L"CS2 Profiles", MB_ICONERROR);
@@ -477,11 +647,12 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show) {
         return 1;
     }
     std::error_code path_error;
-    if (std::filesystem::exists(current_path(), path_error)) load();
+    if (!smoke_test && std::filesystem::exists(current_path(), path_error)) load();
     ShowWindow(window, show);
     UpdateWindow(window);
     bool done = false;
     bool graphics_failed = false;
+    int smoke_frames = 0;
     while (!done) {
         MSG message;
         while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
@@ -498,6 +669,12 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show) {
             resize_width = resize_height = 0;
         }
         ImGui_ImplDX11_NewFrame(); ImGui_ImplWin32_NewFrame(); ImGui::NewFrame();
+        if (smoke_test) {
+            const cs2::Skin* sample = smoke_frames < 2 ? cs2::find_skin(7, 282) :
+                smoke_frames < 4 ? cs2::find_skin(7, 302) : cs2::find_skin(5033, 10028);
+            if (!sample) { graphics_failed = true; break; }
+            select_skin(*sample);
+        }
         draw();
         ImGui::Render();
         const float clear[] = {0.96f, 0.96f, 0.97f, 1};
@@ -506,9 +683,14 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show) {
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
         const auto result = swapchain->Present(1, 0);
         if (FAILED(result)) { graphics_failed = true; break; }
+        if (smoke_test) {
+            const auto* sample = cs2::find_skin(profile.item.definition_id, profile.item.paint_kit);
+            if (!sample || !preview_texture(*sample).view) { graphics_failed = true; break; }
+            if (++smoke_frames == 6) done = true;
+        }
         if (result == DXGI_STATUS_OCCLUDED) Sleep(30);
     }
-    if (graphics_failed) MessageBoxW(window, L"The graphics device failed. Unsaved settings could not be saved automatically.",
+    if (graphics_failed && !smoke_test) MessageBoxW(window, L"The graphics device failed. Unsaved settings could not be saved automatically.",
         L"CS2 Profiles", MB_ICONERROR);
     ImGui_ImplDX11_Shutdown(); ImGui_ImplWin32_Shutdown(); ImGui::DestroyContext();
     destroy_device();

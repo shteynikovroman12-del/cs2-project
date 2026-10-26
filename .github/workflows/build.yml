@@ -17,6 +17,15 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: Cache catalog images
+        if: runner.os == 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: assets/previews
+          key: cs2-preview-png-${{ hashFiles('assets/preview-manifest.json') }}
+      - name: Download offline previews
+        if: runner.os == 'Windows'
+        run: python tools/download_previews.py
       - name: Configure
         run: cmake -S . -B build/ci -DCMAKE_BUILD_TYPE=Release
       - name: Build
@@ -34,7 +43,7 @@ jobs:
           results = Path('build/ci/test-results.xml')
           if results.exists():
               suite = ET.parse(results).getroot()
-              lines = ['## Profile tests', '', '| Test | Result |', '| --- | --- |']
+              lines = ['## Application tests', '', '| Test | Result |', '| --- | --- |']
               for case in suite.iter('testcase'):
                   failed = case.find('failure') is not None or case.find('error') is not None
                   skipped = case.find('skipped') is not None
@@ -56,6 +65,9 @@ jobs:
           Copy-Item build/ci/Release/cs2_profiles.exe artifacts/CS2Profiles/
           Copy-Item README.md artifacts/CS2Profiles/
           Copy-Item build/ci/_deps/imgui-src/LICENSE.txt artifacts/CS2Profiles/IMGUI-LICENSE.txt
+          Copy-Item -Recurse licenses artifacts/CS2Profiles/
+          Copy-Item -Recurse build/ci/Release/previews artifacts/CS2Profiles/
+          Copy-Item THIRD_PARTY_NOTICES.md artifacts/CS2Profiles/
       - uses: actions/upload-artifact@v4
         if: runner.os == 'Windows'
         with:
