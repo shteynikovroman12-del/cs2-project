@@ -21,6 +21,15 @@ jobs:
         if: runner.os == 'Windows'
         shell: powershell
         run: ./tests/test_client_info.ps1
+      - name: Upload small client information tool
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: CS2-client-info-tool
+          path: |
+            tools/Collect-CS2Info.ps1
+            tools/Collect-CS2Info.cmd
+          if-no-files-found: error
       - name: Cache catalog images
         if: runner.os == 'Windows'
         uses: actions/cache@v4
