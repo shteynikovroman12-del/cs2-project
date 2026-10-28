@@ -14,6 +14,15 @@
   ownership of that artwork. This project is not affiliated with Valve.
 - Dear ImGui v1.91.9b is distributed under MIT. Its license is included in the
   application archive as `IMGUI-LICENSE.txt`.
+- Static schema research used the layout descriptions in
+  [a2x/cs2-analyzer](https://github.com/a2x/cs2-analyzer), commit
+  `4367fa2b0d2ee4a62e504fbab518a428151b9f9f` (MIT). The current client's static
+  class-record layout was independently checked and differs from that revision.
+  The upstream license is included in `licenses/cs2-analyzer.txt`.
+- Extracted field offsets were compared with a2x/cs2-dumper commit
+  `1005c258412a3657ac73ed1a9f84b9cbedddd876`. Its tables are not bundled;
+  `research/cs2-build-26144732.json` contains values extracted from the supplied
+  binaries and comparison provenance. No Valve DLL is included in the repository.
 
 The preview selects a static inventory image for the chosen wear condition.
 Some conditions share the same artwork. It is not an exact rendering of a
