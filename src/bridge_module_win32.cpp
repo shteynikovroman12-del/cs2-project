@@ -14,7 +14,7 @@ HANDLE shared_mutex{}, mapping{};
 using Frame = void(__fastcall*)(void*, int);
 Frame original_frame{};
 Request desired{};
-bool enabled{}, faulted{};
+bool enabled{}, faulted{}, updating{};
 std::uint32_t generation{}, applied_generation{};
 // Native material work may outlive the immediate call. Keep borrowed buffers
 // alive until process exit, even if restoring the original vector fails.
@@ -230,7 +230,13 @@ void __fastcall frame(void* self, int stage) {
     if (stage != 6 || !shared || !shared_mutex) return;
     const auto acquired = WaitForSingleObject(shared_mutex, 0);
     if (acquired != WAIT_OBJECT_0 && acquired != WAIT_ABANDONED) return;
-    update_guarded();
+    // The Windows mutex is recursive. A native refresh must not cause a nested
+    // callback to replace the same temporary attribute vector a second time.
+    if (!updating) {
+        updating = true;
+        update_guarded();
+        updating = false;
+    }
     ReleaseMutex(shared_mutex);
 }
 bool check_function(const build::Function& function) {
@@ -308,9 +314,9 @@ DWORD WINAPI start(void*) {
 }
 } // namespace
 
-BOOL WINAPI DllMain(HINSTANCE module, DWORD reason, LPVOID) {
+BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
-        DisableThreadLibraryCalls(module);
+        // Keep thread notifications enabled: the MSVC build uses the static CRT.
         // The module stays loaded until CS2 exits, so an in-flight frame callback
         // can never point into unloaded code. No worker threads perform game calls.
         HANDLE thread = CreateThread(nullptr, 0, start, nullptr, 0, nullptr);
