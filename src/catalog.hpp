@@ -17,6 +17,7 @@ struct Skin {
     float max_wear;
     std::uint32_t rarity_rgb;
     const char* wear_images[5];
+    bool legacy_model;
 };
 struct WearPreview { const char* file; int state; bool fallback; };
 struct CatalogItem {

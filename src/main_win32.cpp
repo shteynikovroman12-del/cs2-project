@@ -1,6 +1,7 @@
 #include "profile.hpp"
 #include "catalog.hpp"
 #include "image_decode.hpp"
+#include "bridge_client_win32.hpp"
 #include "imgui.h"
 #include "imgui_impl_dx11.h"
 #include "imgui_impl_win32.h"
@@ -35,7 +36,8 @@ std::filesystem::path preview_directory;
 char finish_search[128]{};
 int selected_category = 0;
 char profile_name[65] = "default";
-std::string status = "Local profile editor. CS2 integration is not implemented.";
+cs2::bridge::Client game_bridge;
+std::string status = "Profiles are local. Experimental weapon integration is available in Settings.";
 bool status_error = false;
 
 template <typename T> void release(T*& object) {
@@ -213,7 +215,34 @@ void unavailable_apply() {
     ImGui::BeginDisabled();
     ImGui::Button("Apply to CS2 - unavailable", {-1, 36 * scale});
     ImGui::EndDisabled();
-    note("No game connection. Editing a profile does not change CS2 or your Steam inventory.");
+    note("This category is preview/profile only. Game integration currently accepts weapon paint, seed and wear.");
+}
+
+void integration_controls(bool allow_apply) {
+    ImGui::Spacing();
+    if (!game_bridge.connected()) {
+        ImGui::BeginDisabled(game_bridge.connecting());
+        if (ImGui::Button(game_bridge.connecting() ? "Connecting..." : "Connect to CS2 (experimental)", {-1, 0})) game_bridge.connect();
+        ImGui::EndDisabled();
+    } else {
+        ImGui::BeginDisabled(!game_bridge.usable());
+        if (allow_apply && ImGui::Button("Apply weapon paint / seed / wear", {-1, 0})) {
+            status_error = !game_bridge.apply(profile);
+            status = game_bridge.message();
+        }
+        if (ImGui::Button("Restore original weapon", {-1, 0})) {
+            status_error = !game_bridge.restore();
+            status = game_bridge.message();
+        }
+        ImGui::EndDisabled();
+    }
+    note(game_bridge.message().c_str());
+    if (game_bridge.connected()) {
+        const auto& s = game_bridge.snapshot();
+        ImGui::TextDisabled("Frames: %u | Refreshes: %u | Observed item: %d / paint: %d",
+                            s.frames, s.updates, s.observed_definition, s.observed_paint);
+        if (s.request_id != s.acknowledged_id) note("Command is waiting for a game frame.");
+    }
 }
 
 void select_skin(const cs2::Skin& skin) {
@@ -542,7 +571,8 @@ void skin_page() {
         integer("Definition ID", profile.item.definition_id);
         integer("Paint kit ID", profile.item.paint_kit);
     }
-    unavailable_apply();
+    if (selected && selected->category == cs2::Category::Weapon) integration_controls(true);
+    else unavailable_apply();
     ImGui::EndChild();
 }
 
@@ -672,10 +702,12 @@ void settings_page() {
          "Item artwork belongs to Valve and the respective creators. Wear selects a condition image; exact float and seed are not rendered.");
     note(preview_directory.u8string().c_str());
     ImGui::Spacing();
-    heading("Integration status");
-    ImGui::TextColored(accent, "NOT IMPLEMENTED");
-    note("This application does not attach to CS2, modify the game, read your inventory, or communicate with Steam. "
-         "There is no implemented game backend in this version. Premier and matchmaking behavior has not been tested.");
+    heading("Experimental integration");
+    note("Weapon finishes, seed and wear for the supplied build 26144732 only. Start a practice map and hold the selected weapon model. "
+         "Disable StatTrak and clear Custom name for this test. Other categories and World remain local profile settings.");
+    note("Connect loads cs2_bridge.dll into the running game. The module remains loaded until CS2 exits. "
+         "Visual results, Premier and matchmaking are unverified. This does not add items to your Steam inventory.");
+    integration_controls(false);
     ImGui::Spacing();
     heading("Validation");
     const auto errors = cs2::validate(profile);
@@ -709,7 +741,8 @@ void draw() {
     ImGui::GetWindowDrawList()->AddRectFilledMultiColor(position, {position.x + width, position.y + 2 * scale},
         IM_COL32(255, 46, 97, 255), IM_COL32(113, 116, 255, 255), IM_COL32(113, 116, 255, 255), IM_COL32(255, 46, 97, 255));
     ImGui::Dummy({0, 5 * scale});
-    note("PROFILE EDITOR  /  CS2 is not connected. Settings are not applied to the game.");
+    note(game_bridge.connected() ? "EXPERIMENTAL BRIDGE  /  Only an explicit Apply sends weapon paint, seed and wear. Check the result in CS2."
+                                : "PROFILE EDITOR  /  CS2 is not connected. Experimental weapon integration: Settings.");
     ImGui::Spacing();
     const float footer_height = 56 * scale;
     ImGui::BeginChild("content", {0, -footer_height});
@@ -771,7 +804,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR command_line, int show) 
     WNDCLASSEXW window_class{sizeof(WNDCLASSEXW), CS_CLASSDC, window_proc, 0, 0, instance,
         nullptr, LoadCursorW(nullptr, IDC_ARROW), nullptr, nullptr, L"CS2ProfilesWindow", nullptr};
     if (!RegisterClassExW(&window_class)) return 1;
-    const auto window = CreateWindowW(window_class.lpszClassName, L"CS2 Profiles - local editor / no game integration",
+    const auto window = CreateWindowW(window_class.lpszClassName, L"CS2 Profiles - experimental weapon integration",
         WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, static_cast<int>(1180 * scale),
         static_cast<int>(820 * scale), nullptr, nullptr, instance, nullptr);
     if (!window || !create_device(window)) {
@@ -823,7 +856,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR command_line, int show) 
             if (message.message == WM_QUIT) done = true;
         }
         if (done) break;
-        if (IsIconic(window)) { WaitMessage(); continue; }
+        game_bridge.poll();
+        if (IsIconic(window)) { MsgWaitForMultipleObjectsEx(0, nullptr, 50, QS_ALLINPUT, MWMO_INPUTAVAILABLE); continue; }
         if (resize_width && resize_height) {
             context->OMSetRenderTargets(0, nullptr, nullptr);
             release(render_target);

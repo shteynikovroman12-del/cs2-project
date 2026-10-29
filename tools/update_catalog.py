@@ -61,6 +61,7 @@ def main():
         if item.get('phase'):
             finish += ' - ' + item['phase']
         records.append(dict(definition=definition, paint=paint, category=category,
+                            legacy_model=bool(item.get('legacy_model', False)),
                             model=item['weapon']['name'], finish=finish,
                             min_wear=item['min_float'] or 0,
                             max_wear=item['max_float'] if item['max_float'] is not None else 1,
@@ -83,9 +84,10 @@ def main():
             tiers[state] = filename
         low, high = f"{entry['min_wear']:.8f}f", f"{entry['max_wear']:.8f}f"
         tier_data = ', '.join(quote(value) if value else 'nullptr' for value in tiers)
-        lines.append('{%d, %d, Category::%s, %s, %s, %s, %s, %s, 0x%su, {%s}},' % (
+        lines.append('{%d, %d, Category::%s, %s, %s, %s, %s, %s, 0x%su, {%s}, %s},' % (
             entry['definition'], entry['paint'], entry['category'], quote(entry['model']),
-            quote(entry['finish']), quote(entry['file']), low, high, entry['rarity'][1:], tier_data))
+            quote(entry['finish']), quote(entry['file']), low, high, entry['rarity'][1:], tier_data,
+            'true' if entry['legacy_model'] else 'false'))
     (ROOT / 'src/generated').mkdir(parents=True, exist_ok=True)
     (ROOT / 'src/generated/skins.inc').write_text('\n'.join(lines) + '\n', encoding='utf-8')
     items = []
